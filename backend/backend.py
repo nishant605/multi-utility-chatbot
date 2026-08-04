@@ -1,5 +1,7 @@
 #imports
 
+from urllib import response
+
 from langgraph.graph import StateGraph,START,END
 from langgraph.graph.message import add_messages
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -26,12 +28,10 @@ from langgraph.store.sqlite import SqliteStore
 import re
 import bcrypt
 import json
-from pdf2image import convert_from_path
+import fitz  # PyMuPDF  
 import base64
-from io import BytesIO
 
 load_dotenv()
-POPPLER_PATH = os.getenv("POPPLER_PATH")
 
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 if os.getenv("LANGCHAIN_API_KEY"):
@@ -256,43 +256,39 @@ _THREAD_RETRIEVER : Dict[str, Any] = {}
 _THREAD_METADATA : Dict[str, dict] = {}
 
 def extract_text_with_gpt(pdf_path):
-    pages = convert_from_path(pdf_path,poppler_path=POPPLER_PATH)
+    pdf = fitz.open(pdf_path)
+    document = []
 
-    full_text = ""
-
-    for page in pages:
-        buffered = BytesIO()
-        page.save(buffered, format="PNG")
-        image = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
+    for page_num in range(len(pdf)):
+        page = pdf.load_page(page_num)
+        pix = page.get_pixmap(dpi=300)
+        img_bytes = pix.tobytes("png")
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
         response = llm.invoke([
-            HumanMessage(content=[
-                {
-                    "type": "text",
-                    "text": "Extract all text from this document exactly. Preserve headings, tables and paragraphs."
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{image}"
-                    }
-                }
-            ])
-        ])
-        full_text += response.content + "\n\n"
-    
-    return full_text
+            HumanMessage(
+                content=[
+                    {
+                        "type": "text",
+                        "text": (
+                            "Extract ALL text exactly as written.\n"
+                            "Preserve headings, tables, paragraphs, "
+                            "account numbers and formatting."
+                        ),
+                    },
+                    {"type": "image_url","image_url": {"url": f"data:image/png;base64,{img_b64}"},},])]) 
+        document.append(Document(page_content=response.content, metadata={"page": page_num + 1, "source": pdf_path,"ocr": True}))
+    pdf.close()
+    return document
 
 def load_scanned_pdf(file_path: str):
-    text = extract_text_with_gpt(file_path)
-    if not text.strip():
-        raise ValueError("No text could be extracted from the scanned PDF.")
-    return [Document(page_content=text, metadata={"source": file_path})]
+    docs = extract_text_with_gpt(file_path)
+    return docs
 
 def load_pdf(file_path: str):
-    docs = PyPDFLoader(file_path).load()
-    text = "".join(doc.page_content for doc in docs)
-    if len(text.strip()) < 100:  # Arbitrary threshold for "too little text"
+    loader = PyPDFLoader(file_path)
+    docs = loader.load()
+    empty_message = sum(1 for doc in docs if len(doc.page_content.strip()) < 30)
+    if empty_message >= len(docs) * 0.8:  # If there are documents with too little text
         docs = load_scanned_pdf(file_path)
     return docs
 
@@ -352,13 +348,20 @@ def rag_tool(query: str, config: RunnableConfig) -> dict:
     results = retriever.invoke(query)
     context = [doc.page_content for doc in results]
     result_metadata = [doc.metadata for doc in results]
-
+    sources = []
     thread_metadata = thread_document_metadata(thread_id)
+
+    for doc in results:
+        sources.append({
+            "page":doc.metadata.get("page"),
+            "ocr":doc.metadata.get("ocr",False)
+        })
 
     return { 
         "query" : query,
         "context" : context,
         "metadata" : result_metadata,
+        "sources" : sources,
         "source_file": thread_metadata.get("filename")
     }
 
