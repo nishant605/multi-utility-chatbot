@@ -2,7 +2,8 @@
 
 from langgraph.graph import StateGraph,START,END
 from langgraph.graph.message import add_messages
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.documents import Document
 from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage, SystemMessage,HumanMessage
 from langchain_core.tools import tool
@@ -10,6 +11,7 @@ from typing import Annotated, Any, Dict, Optional, TypedDict
 from langgraph.checkpoint.sqlite import SqliteSaver
 import os
 import sqlite3
+from docling.document_converter import DocumentConverter
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_community.tools import DuckDuckGoSearchRun
 from datetime import date
@@ -17,7 +19,6 @@ import requests
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
-from langchain_cohere import CohereEmbeddings
 import yfinance as yf
 from langchain_core.runnables import RunnableConfig
 import shutil
@@ -33,6 +34,9 @@ if os.getenv("LANGCHAIN_API_KEY"):
     os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")
 if os.getenv("LANGCHAIN_PROJECT"):
     os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGCHAIN_PROJECT")
+
+
+os.environ["TORCHINDUCTOR_DISABLE"] = "1"
 
 # Project root
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -56,8 +60,8 @@ USER_DB = DB_DIR / "users.db"
 
 #models
 
-llm = ChatGroq(model="qwen/qwen3-32b", groq_api_key=os.getenv("GROQ_API_KEY"))
-embedding = CohereEmbeddings(model="embed-v4.0",cohere_api_key=os.getenv("COHERE_API_KEY"))
+llm = ChatOpenAI(model="gpt-4.1-mini",api_key=os.getenv("OPENAI_API_KEY"),temperature=0)
+embedding = OpenAIEmbeddings(model="text-embedding-3-small",openai_api_key=os.getenv("OPENAI_API_KEY"))
 
 today_str = date.today().isoformat()  # Get today's date in YYYY-MM-DD format
 
@@ -253,6 +257,24 @@ def _get_retriever(thread_id : Optional[str]):
         return _THREAD_RETRIEVER[thread_id]
     return None
 
+def load_scanned_pdf(file_path: str):
+    converter = DocumentConverter()
+
+    result = converter.convert(file_path)
+
+    markdown = result.document.export_to_markdown()
+
+    docs = [Document(page_content=markdown, metadata={"source": file_path})]
+
+    return docs
+
+def load_pdf(file_path: str):
+    docs = PyPDFLoader(file_path).load()
+    text = "".join(doc.page_content for doc in docs)
+    if len(text.strip()) < 100:  # Arbitrary threshold for "too little text"
+        docs = load_scanned_pdf(file_path)
+    return docs
+
 def pdf_process(file_path: str, thread_id: str, filename: Optional[str] = None) -> dict:
         """
         Build a FAI SS retriever for the uploaded PDF and store it for the thread.
@@ -261,8 +283,7 @@ def pdf_process(file_path: str, thread_id: str, filename: Optional[str] = None) 
         """
         #computer read from bytes
         try:
-            loader = PyPDFLoader(file_path)
-            docs = loader.load()
+            docs = load_pdf(file_path)
 
             splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, separators=["\n\n", "\n", " ", ""])
             chunks = splitter.split_documents(docs)
@@ -293,7 +314,7 @@ def pdf_process(file_path: str, thread_id: str, filename: Optional[str] = None) 
             import traceback
             traceback.print_exc()   # prints full stack trace to your terminal/logs
             return {"error": str(e)}
-    
+
 @tool
 def rag_tool(query: str, config: RunnableConfig) -> dict:
     """
