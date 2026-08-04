@@ -26,6 +26,7 @@ from pathlib import Path
 from langgraph.store.sqlite import SqliteStore
 import re
 import bcrypt
+import json
 
 load_dotenv()
 
@@ -287,15 +288,18 @@ def pdf_process(file_path: str, thread_id: str, filename: Optional[str] = None) 
 
             vector_path = VECTORSTORE_DIR / thread_id
 
-            _THREAD_METADATA[thread_id] = {"filename": filename or os.path.basename(file_path),
-                                        "documents": len(docs),
-                                        "chunks": len(chunks)}
+            if vector_path.exists():
+                shutil.rmtree(vector_path)
 
-            return {
+            vector_store.save_local(str(vector_path))
+
+            metadata =  {
                 "filename": filename or os.path.basename(file_path),
                 "documents": len(docs),
                 "chunks": len(chunks),
             }
+            with open(vector_path / "metadata.json", "w") as f:
+                json.dump(metadata, f)
         except Exception as e:
             import traceback
             traceback.print_exc()   # prints full stack trace to your terminal/logs
@@ -308,6 +312,8 @@ def rag_tool(query: str, config: RunnableConfig) -> dict:
     """
 
     thread_id = config.get("configurable", {}).get("thread_id")
+    metadata = thread_document_metadata(thread_id)
+
     vector_path = VECTORSTORE_DIR / thread_id
     if not vector_path.exists():
         return {"error": "No vector store found for the given thread_id. Please upload a PDF first."}
@@ -323,7 +329,7 @@ def rag_tool(query: str, config: RunnableConfig) -> dict:
         "query" : query,
         "context" : context,
         "metadata" : metadata,
-        "source_file": _THREAD_METADATA.get(thread_id, {}).get("filename")
+        "source_file": metadata.get("filename")
     }
 
 @tool
@@ -654,5 +660,12 @@ def retrieve_all_threads(user_id):
     conn.close()
     return threads
 
-def thread_document_metadata(thread_id: str) -> dict:
-    return _THREAD_METADATA.get(str(thread_id), {})
+def thread_document_metadata(thread_id: str):
+    vector_path = VECTORSTORE_DIR / str(thread_id)
+    metadata_file = vector_path / "metadata.json"
+
+    if not metadata_file.exists():
+        return {}
+
+    with open(metadata_file, "r") as f:
+        return json.load(f)
