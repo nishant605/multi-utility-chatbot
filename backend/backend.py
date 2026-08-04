@@ -83,7 +83,9 @@ def get_stock_price(symbol: str) -> dict:
     )
     response = requests.get(url)
     if response.status_code != 200:
-        raise Exception(f"Error fetching stock price: {response.status_code}")
+        return {
+        "status": "error",
+        "message": "Alpha Vantage rate limit exceeded."}
     return response.json()
 
 @tool
@@ -94,15 +96,21 @@ def get_indian_stock_price(symbol: str) -> dict:
     """
     try:
         stock = yf.Ticker(symbol)
-        info = stock.info
+        info = stock.fast_info
+
         return {
+            "status": "success",
             "symbol": info.get("symbol"),
             "price": info.get("regularMarketPrice"),
             "currency": info.get("currency"),
             "exchange": info.get("exchange"),
         }
+
     except Exception as e:
-        raise Exception(f"Error fetching Indian stock price: {e}")
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 conn1 = sqlite3.connect(EXPENSE_DB)  # Connect to the expenses database 
 cursor = conn1.cursor()
