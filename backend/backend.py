@@ -65,9 +65,8 @@ MEMORY_DB = DB_DIR / "memories.db"
 USER_DB = DB_DIR / "users.db"
 
 #models
-print("FINNHUB_API_KEY:", os.getenv("FINNHUB_API_KEY"))
 
-llm = ChatOpenAI(model="gpt-4.1-mini",api_key=os.getenv("OPENAI_API_KEY"),temperature=0)
+llm = ChatOpenAI(model="gpt-4.1",api_key=os.getenv("OPENAI_API_KEY"),temperature=0)
 embedding = OpenAIEmbeddings(model="text-embedding-3-small",openai_api_key=os.getenv("OPENAI_API_KEY"))
 
 today_str = date.today().isoformat()  # Get today's date in YYYY-MM-DD format
