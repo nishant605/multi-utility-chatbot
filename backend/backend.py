@@ -11,7 +11,6 @@ from typing import Annotated, Any, Dict, Optional, TypedDict
 from langgraph.checkpoint.sqlite import SqliteSaver
 import os
 import sqlite3
-from docling.document_converter import DocumentConverter
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_community.tools import DuckDuckGoSearchRun
 from datetime import date
