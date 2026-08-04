@@ -251,12 +251,6 @@ def update_expense(expense_id: int, amount: Optional[float] = None, category: Op
 _THREAD_RETRIEVER : Dict[str, Any] = {}
 _THREAD_METADATA : Dict[str, dict] = {}
 
-def _get_retriever(thread_id : Optional[str]):
-    """Fetch the retriever for a thread if available."""
-    if thread_id and thread_id in _THREAD_RETRIEVER:
-        return _THREAD_RETRIEVER[thread_id]
-    return None
-
 def load_scanned_pdf(file_path: str):
     converter = DocumentConverter()
 
@@ -293,14 +287,6 @@ def pdf_process(file_path: str, thread_id: str, filename: Optional[str] = None) 
 
             vector_path = VECTORSTORE_DIR / thread_id
 
-            vector_store.save_local(str(vector_path))
-
-            retriever = vector_store.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": 3}
-            )
-
-            _THREAD_RETRIEVER[thread_id] = retriever
             _THREAD_METADATA[thread_id] = {"filename": filename or os.path.basename(file_path),
                                         "documents": len(docs),
                                         "chunks": len(chunks)}
@@ -322,10 +308,13 @@ def rag_tool(query: str, config: RunnableConfig) -> dict:
     """
 
     thread_id = config.get("configurable", {}).get("thread_id")
-    retriever = _get_retriever(thread_id)
-    if retriever is None:
-        return {"error": "No retriever found for the given thread_id. Please upload a PDF first."}
-    
+    vector_path = VECTORSTORE_DIR / thread_id
+    if not vector_path.exists():
+        return {"error": "No vector store found for the given thread_id. Please upload a PDF first."}
+
+    vector_store = FAISS.load_local(str(vector_path), embedding,allow_dangerous_deserialization=True)
+    retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 3})
+
     results = retriever.invoke(query)
     context = [doc.page_content for doc in results]
     metadata = [doc.metadata for doc in results]
