@@ -257,8 +257,13 @@ if uploaded_pdf:
             with open(save_path, "wb") as f:
                 f.write(uploaded_pdf.getvalue())
             summary = pdf_process(save_path, thread_key, uploaded_pdf.name)
-            thread_docs[uploaded_pdf.name] = summary
-            statusbox.success(f"PDF `{uploaded_pdf.name}` processed successfully.")
+            if "error" in summary:
+                statusbox.update(label="❌ PDF processing failed",state="error",expanded=True,)
+                st.sidebar.error(summary["error"])
+            else:
+        
+                thread_docs[uploaded_pdf.name] = summary
+                statusbox.update(label=f"✅ PDF `{uploaded_pdf.name}` processed successfully",state="complete",expanded=False,)
 
 st.sidebar.divider()
 st.sidebar.subheader("🗂️ Past conversations")
