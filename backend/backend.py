@@ -1,5 +1,7 @@
 #imports
 
+from importlib import metadata
+from importlib.metadata import metadata
 from urllib import response
 
 from langgraph.graph import StateGraph,START,END
@@ -63,6 +65,7 @@ MEMORY_DB = DB_DIR / "memories.db"
 USER_DB = DB_DIR / "users.db"
 
 #models
+print("FINNHUB_API_KEY:", os.getenv("FINNHUB_API_KEY"))
 
 llm = ChatOpenAI(model="gpt-4.1-mini",api_key=os.getenv("OPENAI_API_KEY"),temperature=0)
 embedding = OpenAIEmbeddings(model="text-embedding-3-small",openai_api_key=os.getenv("OPENAI_API_KEY"))
@@ -71,22 +74,81 @@ today_str = date.today().isoformat()  # Get today's date in YYYY-MM-DD format
 
 search_tool = DuckDuckGoSearchRun(region="us-en")
 
+def get_ticker(company):
+
+    prompt = f"""
+Convert this company name into a stock ticker.
+
+Examples
+
+Apple -> AAPL
+Google -> GOOGL
+Microsoft -> MSFT
+Tesla -> TSLA
+Nvidia -> NVDA
+
+SBI -> SBIN.NS
+State Bank of India -> SBIN.NS
+Reliance -> RELIANCE.NS
+Tata Steel -> TATASTEEL.NS
+Infosys -> INFY.NS
+
+Return ONLY the ticker.
+
+Company:
+{company}
+"""
+
+    response = llm.invoke(prompt)
+
+    return response.content.strip()
+
 @tool
 def get_stock_price(symbol: str) -> dict:
     """
-    Fetch latest stock price for a given symbol (e.g. 'AAPL', 'TSLA') 
-    using Alpha Vantage with API key in the URL.
+    Fetch the latest stock price using Finnhub.
+    Example symbols:
+        AAPL
+        NVDA
+        TSLA
+        MSFT
+        GOOGL
     """
-    url = (
-        "https://www.alphavantage.co/query"
-        f"?function=GLOBAL_QUOTE&symbol={symbol}&apikey={os.getenv('ALPHA_VANTAGE_API_KEY')}"
-    )
-    response = requests.get(url)
-    if response.status_code != 200:
+    url = "https://finnhub.io/api/v1/quote"
+    symbol = get_ticker(symbol)
+    params = {"symbol": symbol.upper(),"token": os.getenv("FINNHUB_API_KEY")}
+    try:
+        response = requests.get(url, params=params,timeout=10)
+        print("FINNHUB_API_KEY:", os.getenv("FINNHUB_API_KEY"))
+        print("URL:", response.url)
+        print("Status:", response.status_code)
+        print("Response:", response.text)
+        if response.status_code != 200:
+            return {
+                "status": "error",
+                "message": f"Failed to fetch stock price. Status code: {response.status_code}"
+            }
+        data = response.json()
+        if data.get("c",0) == 0:
+            return {
+                "status": "error",
+                "message": f"No data found for symbol: {symbol}"
+            }
         return {
-        "status": "error",
-        "message": "Alpha Vantage rate limit exceeded."}
-    return response.json()
+            "status": "success",
+            "symbol": symbol.upper(),
+            "current_price": data["c"],
+            "high": data["h"],
+            "low": data["l"],
+            "open": data["o"],
+            "previous_close": data["pc"]
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
 
 @tool
 def get_indian_stock_price(symbol: str) -> dict:
@@ -95,15 +157,16 @@ def get_indian_stock_price(symbol: str) -> dict:
     using Yahoo Finance.
     """
     try:
+        symbol = get_ticker(symbol)
         stock = yf.Ticker(symbol)
-        info = stock.fast_info
+        fast = stock.fast_info
 
         return {
-            "status": "success",
-            "symbol": info.get("symbol"),
-            "price": info.get("regularMarketPrice"),
-            "currency": info.get("currency"),
-            "exchange": info.get("exchange"),
+        "status": "success",
+        "symbol": symbol,
+        "price": fast.get("lastPrice"),
+        "currency": fast.get("currency"),
+        "exchange": fast.get("exchange"),
         }
 
     except Exception as e:
@@ -128,6 +191,7 @@ CREATE TABLE IF NOT EXISTS expenses (
 
 conn1.commit()
 conn1.close()
+
 
 @tool
 def add_expense(config: RunnableConfig, amount: float, category: str, description: Optional[str], expense_date: str) -> dict:
@@ -619,17 +683,43 @@ def chat_node(state: ChatState, config=None) -> ChatState:
 
     user_id = config.get("configurable", {}).get("user_id")
     thread_id = config.get("configurable", {}).get("thread_id")
+    metadata = thread_document_metadata(thread_id)
     if user_id and thread_id:
         set_thread_owner(thread_id, user_id)
         
 
     memories = get_user_memories(user_id)
 
-    system_message = SystemMessage(
-        content=f"""
-You are a helpful AI assistant.
+    pdf_context = ""
 
-Today's date is {today_str}.
+    if metadata:
+        pdf_context = f"""
+==============================
+UPLOADED PDF
+==============================
+
+The user has already uploaded a PDF.
+
+Filename: {metadata['filename']}
+
+Whenever the user asks about the uploaded PDF,
+its content,
+summary,
+pages,
+or document,
+
+ALWAYS call rag_tool.
+
+Never ask the user to upload the PDF again.
+"""
+
+    system_message = SystemMessage(
+    content=f"""
+You are a helpful assistant.
+
+Today's date is {today_str}
+
+{pdf_context}
 
 ==============================
 LONG TERM MEMORY
@@ -646,38 +736,32 @@ RULES
 2. If the user asks about themselves,
 answer using the stored memories.
 
-3. If the user tells you NEW stable information
-such as:
-
-- Name
-- Birthday
-- Age
-- Hometown
-- City
-- Occupation
-- College
-- Favourite food
-- Favourite color
-- Preferences
-- Goals
-- Family members
-- Permanent facts   
-
+3. If the user tells you stable information
+(name, birthday, city, preferences, goals, etc.),
 call the remember tool.
 
-4. For questions about uploaded PDFs,
-call rag_tool.
+4. If an uploaded PDF exists:
 
-5. For expense tracking,
-use add_expense,
-show_expenses,
-monthly_expense_summary,
-update_expense,
-delete_expense.
+- Never ask the user to upload it again.
+- Never say you don't have access to it.
+- ALWAYS use rag_tool before answering any question about:
+    • the PDF
+    • the document
+    • the uploaded file
+    • its contents
+    • its pages
+    • its summary
+
+5. For expense tracking use:
+- add_expense
+- show_expenses
+- monthly_expense_summary
+- update_expense
+- delete_expense
 
 Never ask for a user_id.
 """
-    )
+)
 
     messages = [system_message] + state["messages"][-10:]
 
