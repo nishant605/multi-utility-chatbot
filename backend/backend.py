@@ -27,8 +27,12 @@ from langgraph.store.sqlite import SqliteStore
 import re
 import bcrypt
 import json
+from pdf2image import convert_from_path
+import base64
+from io import BytesIO
 
 load_dotenv()
+POPPLER_PATH = os.getenv("POPPLER_PATH")
 
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 if os.getenv("LANGCHAIN_API_KEY"):
@@ -252,16 +256,39 @@ def update_expense(expense_id: int, amount: Optional[float] = None, category: Op
 _THREAD_RETRIEVER : Dict[str, Any] = {}
 _THREAD_METADATA : Dict[str, dict] = {}
 
+def extract_text_with_gpt(pdf_path):
+    pages = convert_from_path(pdf_path,poppler_path=POPPLER_PATH)
+
+    full_text = ""
+
+    for page in pages:
+        buffered = BytesIO()
+        page.save(buffered, format="PNG")
+        image = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+        response = llm.invoke([
+            HumanMessage(content=[
+                {
+                    "type": "text",
+                    "text": "Extract all text from this document exactly. Preserve headings, tables and paragraphs."
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{image}"
+                    }
+                }
+            ])
+        ])
+        full_text += response.content + "\n\n"
+    
+    return full_text
+
 def load_scanned_pdf(file_path: str):
-    converter = DocumentConverter()
-
-    result = converter.convert(file_path)
-
-    markdown = result.document.export_to_markdown()
-
-    docs = [Document(page_content=markdown, metadata={"source": file_path})]
-
-    return docs
+    text = extract_text_with_gpt(file_path)
+    if not text.strip():
+        raise ValueError("No text could be extracted from the scanned PDF.")
+    return [Document(page_content=text, metadata={"source": file_path})]
 
 def load_pdf(file_path: str):
     docs = PyPDFLoader(file_path).load()
@@ -300,6 +327,8 @@ def pdf_process(file_path: str, thread_id: str, filename: Optional[str] = None) 
             }
             with open(vector_path / "metadata.json", "w") as f:
                 json.dump(metadata, f)
+
+            return metadata
         except Exception as e:
             import traceback
             traceback.print_exc()   # prints full stack trace to your terminal/logs
@@ -323,13 +352,15 @@ def rag_tool(query: str, config: RunnableConfig) -> dict:
 
     results = retriever.invoke(query)
     context = [doc.page_content for doc in results]
-    metadata = [doc.metadata for doc in results]
+    result_metadata = [doc.metadata for doc in results]
+
+    thread_metadata = thread_document_metadata(thread_id)
 
     return { 
         "query" : query,
         "context" : context,
-        "metadata" : metadata,
-        "source_file": metadata.get("filename")
+        "metadata" : result_metadata,
+        "source_file": thread_metadata.get("filename")
     }
 
 @tool
@@ -411,7 +442,14 @@ def login_user(username: str, password: str):
 
     if result is None:
         return False
-    stored_hash = result[0].encode("utf-8")
+    stored_hash = result[0]
+
+    if isinstance(stored_hash, str):
+        stored_hash = stored_hash.encode("utf-8")
+
+    if not stored_hash.startswith(b"$2"):
+        print(f"Invalid password hash for user: {username}")
+        return False
     if bcrypt.checkpw(
         password.encode("utf-8"),
         stored_hash
